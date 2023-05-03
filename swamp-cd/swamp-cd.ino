@@ -1,5 +1,6 @@
 #include <dht.h>
 #include <LiquidCrystal.h>
+#include <Stepper.h>
 
 //Cisco Dacanay
 //Final Project
@@ -20,15 +21,20 @@ volatile unsigned char* my_ADCSRB = (unsigned char*) 0x7B;
 volatile unsigned char* my_ADCSRA = (unsigned char*) 0x7A;
 volatile unsigned int* my_ADC_DATA = (unsigned int*) 0x78;
 
+
 dht DHT;
-//#define DHT11_PIN 8
+LiquidCrystal lcd(7, 6, 5, 4, 3, 2);
+Stepper stepper = Stepper(64, 12, 10, 11, 9);
+
 void setup() {
   U0init(9600);
   adc_init();
+  lcd.begin(16, 2);
   *ddr_b |= 0x10; //pb4 output
 }
 
 void loop() {
+  /*
   //water level
   *port_b |= 0x10;  //pb4 power sensor on to read input
   unsigned int adc_voltage = adc_read(0); //read channel 0
@@ -40,13 +46,26 @@ void loop() {
   //Serial output
   //U0putVoltage(voltage_float);
   if(water_level < 50) {
-    U0putString("Water Level Low");
+    U0putStringLn("Water Level Low");
   }
-
+  */
   //dht
   int chk = DHT.read11(8); //read pin 8
+  //U0putString("Temperature = ");
+  lcd.setCursor(0,0); 
+  lcd.print("Temp: ");
+  lcd.print(DHT.temperature);
+  lcd.print((char)223);
+  lcd.print("C");
+  lcd.setCursor(0,1);
+  lcd.print("Humidity: ");
+  lcd.print(DHT.humidity);
+  lcd.print("%");
 
-  delay(500);
+  stepper.setSpeed(300);
+  stepper.step(2048);
+
+  delay(1500);
 }
 
 void U0init(unsigned long U0baud)
@@ -83,6 +102,12 @@ void U0putchar(unsigned char U0pdata) // Wait for USART0 TBE to be set then writ
 }
 
 void U0putString(String U0string) {
+  for(int i = 0; i < U0string.length(); i++) {
+    U0putchar(U0string[i]);
+  }
+}
+
+void U0putStringLn(String U0string) {
   for(int i = 0; i < U0string.length(); i++) {
     U0putchar(U0string[i]);
   }
