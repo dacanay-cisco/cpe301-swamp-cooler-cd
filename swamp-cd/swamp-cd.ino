@@ -1,10 +1,18 @@
+//Cisco Dacanay
+//Final Project
+//5/9/23
+
+#include <uRTCLib.h>
 #include <dht.h>
 #include <LiquidCrystal.h>
 #include <Stepper.h>
 
-//Cisco Dacanay
-//Final Project
-//5/9/23
+#define TARGET_TEMP 22.0    //target temperature for swamp cooler (will turn on 1 deg above and off 1 deg below this number)
+#define MONTH 5   //set month num
+#define DAY 9   //set day num
+#define YEAR 23   //set year 20XX
+#define HOUR 5    //set hour num 0-24
+#define MINUTE 0    //set minute num
 
 volatile unsigned char *myUCSR0A = (unsigned char *)0x00C0;
 volatile unsigned char *myUCSR0B = (unsigned char *)0x00C1;
@@ -21,52 +29,120 @@ volatile unsigned char* my_ADCSRB = (unsigned char*) 0x7B;
 volatile unsigned char* my_ADCSRA = (unsigned char*) 0x7A;
 volatile unsigned int* my_ADC_DATA = (unsigned int*) 0x78;
 
+enum State {DISABLED = 0, ERROR = 1, IDLE = 2, RUNNING = 3};
+enum State currentState = IDLE;
+
 
 dht DHT;
 LiquidCrystal lcd(7, 6, 5, 4, 3, 2);
 Stepper stepper = Stepper(64, 12, 10, 11, 9);
+uRTCLib rtc(0x68);
 
 void setup() {
   U0init(9600);
   adc_init();
   lcd.begin(16, 2);
   *ddr_b |= 0x10; //pb4 output
+  *ddr_b |= 0x01; //pb0 output
+  URTCLIB_WIRE.begin();
+  rtc.set(0, MINUTE, HOUR, 2, DAY, MONTH, YEAR);
 }
+
 
 void loop() {
-  /*
-  //water level
-  *port_b |= 0x10;  //pb4 power sensor on to read input
-  unsigned int adc_voltage = adc_read(0); //read channel 0
-  *port_b &= 0xEF;  //pb4 power off
-  //float voltage_float = adc_voltage * 5.0 / 1024.0; //convert 0-1023 to 0-5.0V
-  int water_level = adc_voltage / 2;
-  U0putint(water_level);
 
-  //Serial output
-  //U0putVoltage(voltage_float);
-  if(water_level < 50) {
+  if(currentState == RUNNING) {
+    //fan
+    if(!(*port_b & 0x01)) {
+      *port_b |= 0x01;  //pb0 high
+    }
+
+    int chk = DHT.read11(8); //read pin 8
+    if(DHT.temperature < TARGET_TEMP - 1) {
+      currentState = IDLE;
+    }
+  }
+
+  if(currentState < RUNNING) {
+    //fan
+    if(*port_b & 0x01) {
+      *port_b &= 0xFE;  //pb0 low
+    }
+  }
+  
+  if(currentState >= IDLE) {
+    //water level
+    *port_b |= 0x10;  //pb4 power sensor on to read input
+    unsigned int adc_voltage = adc_read(0); //read channel 0
+    *port_b &= 0xEF;  //pb4 plow
+    //float voltage_float = adc_voltage * 5.0 / 1024.0; //convert 0-1023 to 0-5.0V
+    int water_level = adc_voltage / 2;
+    U0putint(water_level);
+    U0putchar('\n');
+
+    //Serial output
+    //U0putVoltage(voltage_float);
+    if(water_level < 50) {
+      currentState = ERROR;
+    }
+
+    //dht
+    int chk = DHT.read11(8); //read pin 8
+    lcd.setCursor(0,0); 
+    lcd.print("Temp: ");
+    lcd.print(DHT.temperature);
+    lcd.print((char)223);
+    lcd.print("C");
+    lcd.setCursor(0,1);
+    lcd.print("Humidity: ");
+    lcd.print(DHT.humidity);
+    lcd.print("%");
+
+    
+  }
+
+  if(currentState == IDLE) {
+    if(DHT.temperature > TARGET_TEMP + 1) {
+      currentState = RUNNING;
+    }
+  }
+  
+  if(currentState == ERROR) {
+    lcd.clear();
+    lcd.print("ERROR: Water Level Low");
+    
     U0putStringLn("Water Level Low");
   }
-  */
-  //dht
-  int chk = DHT.read11(8); //read pin 8
-  //U0putString("Temperature = ");
-  lcd.setCursor(0,0); 
-  lcd.print("Temp: ");
-  lcd.print(DHT.temperature);
-  lcd.print((char)223);
-  lcd.print("C");
-  lcd.setCursor(0,1);
-  lcd.print("Humidity: ");
-  lcd.print(DHT.humidity);
-  lcd.print("%");
 
-  stepper.setSpeed(300);
-  stepper.step(2048);
 
-  delay(1500);
+  //U0putint(currentState);
+
+
+  //stepper.setSpeed(300);
+  //stepper.step(2048);
+  getClock();
+  delay(2000);
+
 }
+
+void getClock() {
+  rtc.refresh();
+  U0putint(rtc.hour());
+  U0putchar(':');
+  if(rtc.minute() < 10) {
+    U0putchar('0');
+  }
+  U0putint(rtc.minute());
+  U0putString(" ");
+  U0putint(rtc.month());
+  U0putchar('/');
+  U0putint(rtc.day());
+  U0putchar('/');
+  U0putint(rtc.year());
+
+  U0putchar('\n');
+}
+
 
 void U0init(unsigned long U0baud)
 {
@@ -131,8 +207,6 @@ void U0putint(int U0int) {
     temp = temp % power;
     power /= 10;
   }
-
-  U0putchar('\n');
 }
 
 void U0putVoltage(float voltage_float) {
