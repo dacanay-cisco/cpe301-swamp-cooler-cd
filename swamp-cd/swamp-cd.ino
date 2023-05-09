@@ -7,7 +7,7 @@
 #include <LiquidCrystal.h>
 #include <Stepper.h>
 
-#define TARGET_TEMP 22.0    //target temperature for swamp cooler (will turn on 1 deg above and off 1 deg below this number)
+#define TARGET_TEMP 23.0    //target temperature for swamp cooler (will turn on 1 deg above and off 1 deg below this number)
 #define MONTH 5   //set month num
 #define DAY 9   //set day num
 #define YEAR 23   //set year 20XX
@@ -52,7 +52,7 @@ enum State currentState = IDLE;
 enum Fan {OFF = 0, HALF = 1, FULL = 2};
 enum Fan fan = OFF;
 
-unsigned long currentMillis = 0, updateMillis = 0;
+unsigned long currentMillis = 0, updateMillis = 0, debounceMillis = 0;
 volatile bool togglePower = 0;
 
 bool updateDisplay = true;
@@ -236,7 +236,6 @@ void loop() {
 
   //getClock();
   delay(100);
-
 }
 
 ISR(TIMER1_OVF_vect) {
@@ -247,7 +246,11 @@ ISR(TIMER1_OVF_vect) {
 }
 
 ISR(INT3_vect) {  //interrupt for on/off
-  togglePower = 1;  //power toggle at beginning of loop, not done directly in case interrupt happens right before another state change
+  if(currentMillis > debounceMillis + 500) { //debounce for button
+    debounceMillis = currentMillis;
+    togglePower = 1;  //power toggle at beginning of loop, not done directly in case interrupt happens right before another state change
+  }
+  
 }
 
 void setState(enum State state) { //set state and print timestamp
