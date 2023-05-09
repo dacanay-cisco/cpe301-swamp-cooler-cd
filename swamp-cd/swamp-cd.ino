@@ -33,16 +33,29 @@ volatile unsigned char* pin_d  = (unsigned char*) 0x29;
 volatile unsigned char* my_EICRA = (unsigned char*) 0x69;
 volatile unsigned char* my_EIMSK  = (unsigned char*) 0x3D;
 
-
 volatile unsigned char* my_ADMUX = (unsigned char*) 0x7C;
 volatile unsigned char* my_ADCSRB = (unsigned char*) 0x7B;
 volatile unsigned char* my_ADCSRA = (unsigned char*) 0x7A;
 volatile unsigned int* my_ADC_DATA = (unsigned int*) 0x78;
 
+//timer
+volatile unsigned char *myTCCR1A = (unsigned char *) 0x80;
+volatile unsigned char *myTCCR1B = (unsigned char *) 0x81;
+volatile unsigned char *myTCCR1C = (unsigned char *) 0x82;
+volatile unsigned char *myTIMSK1 = (unsigned char *) 0x6F;
+volatile unsigned int  *myTCNT1  = (unsigned  int *) 0x84;
+volatile unsigned char *myTIFR1 =  (unsigned char *) 0x36;
+
 enum State {DISABLED = 0, ERROR = 1, IDLE = 2, RUNNING = 3};
-volatile enum State currentState = IDLE;
+enum State currentState = IDLE;
+
+enum Fan {OFF = 0, HALF = 1, FULL = 2};
+enum Fan fan = OFF;
+
+unsigned long currentMillis = 0, updateMillis = 0;
 volatile bool togglePower = 0;
 
+bool updateDisplay = true;
 
 dht DHT;
 LiquidCrystal lcd(7, 6, 5, 4, 3, 2);
@@ -50,11 +63,10 @@ Stepper stepper = Stepper(64, 12, 10, 11, 9);
 uRTCLib rtc(0x68);
 
 void setup() {
-  //port setup
-  //*ddr_b |= 0x01; //pb0 output (fan motor)
-  //*ddr_b &= 0xFB; //pb2 input (stepper motor button)
-  //*ddr_b &= 0xF7; //pb3 input (stepper motor button)
-  //*ddr_b |= 0x10; //pb4 output (stepper motor)
+  
+  *myTCCR1C &= 0x1F; //normal mode
+  *myTIMSK1 |= 0x01;  //enable TOV interrupt
+  *myTCCR1B &= 0xF8;  //stop the timer at startup
 
   *ddr_b &= 0xF3; //pb2+3 input (stepper motor buttons)
   *ddr_b |= 0x11; //pb0+4 output (fan motor + stepper motor)
@@ -69,20 +81,71 @@ void setup() {
   lcd.begin(16, 2);
   URTCLIB_WIRE.begin();
   rtc.set(0, MINUTE, HOUR, 2, DAY, MONTH, YEAR);
-
 }
 
 
 
 void loop() {
+  currentMillis = millis();
   if(togglePower) {
     if(currentState > DISABLED) {
       setState(DISABLED);
+      lcd.noDisplay();
     }
     else {
       setState(IDLE);
+      lcd.display();
     }
     togglePower = 0;
+  }
+
+  switch(fan) {
+    case OFF:
+      if(*port_b & 0x01) {
+        *port_b &= 0xFE;  //pb0 low, turn off fan
+      }
+      if(*myTCCR1B & 0x07) { //if timer on
+        *myTCCR1B &= 0xF8;  //stop the timer
+      }
+      break;
+    case HALF:
+      if(!(*myTCCR1B & 0x07)) {  //if timer not running
+        *myTCCR1B |= 0x05;  //start timer prescaler 1024 for pwm
+      }
+      break;
+    case FULL:
+      if(!(*port_b & 0x01)) {
+        *port_b |= 0x01;  //pb0 high
+      }
+      if(*myTCCR1B & 0x07) { //if timer on
+        *myTCCR1B &= 0xF8;  //stop the timer
+      }
+  }
+  int water_level;
+  if(currentState > DISABLED) {
+    //vent control (stepper motor)
+    if(*pin_b & 0x04 && *pin_b & 0x08) {}   //if both bottons pressed, do nothing
+    else if(*pin_b & 0x04) {
+      stepper.setSpeed(300);
+      stepper.step(-256);
+      U0putString("Vent turned clockwise @ ");
+      getClock();
+    }
+    else if(*pin_b & 0x08) {
+      stepper.setSpeed(300);
+      stepper.step(256);
+      U0putString("Vent turned counterclockwise @ ");
+      getClock();
+    }
+
+    //water level
+    *port_b |= 0x10;  //pb4 high to read water sensor
+    unsigned int adc_voltage = adc_read(0); //read channel 0
+    *port_b &= 0xEF;  //pb4 low
+    water_level = (int)( adc_voltage / 3.35); //adc_voltage reads 335 at max height tap water, turn into 0-100
+    //U0putint(water_level);
+    //U0putchar('\n');
+    
   }
 
   if(currentState == RUNNING) {
@@ -92,52 +155,44 @@ void loop() {
     }
 
     //fan
-    if(!(*port_b & 0x01)) {
-      *port_b |= 0x01;  //pb0 high
+    if(DHT.temperature > TARGET_TEMP + 3) { //if temp more than 3 deg over target, fan on full speed, otherwise pwm 50%
+      fan = FULL;
+    }
+    else {
+      fan = HALF;
     }
 
     int chk = DHT.read11(8); //read pin 8
-    if(DHT.temperature < TARGET_TEMP - 1) {
-      currentState = IDLE;
+    if(DHT.temperature < TARGET_TEMP) {
+      setState(IDLE);
     }
   }
 
   if(currentState < RUNNING) {
     //fan
-    if(*port_b & 0x01) {
-      *port_b &= 0xFE;  //pb0 low
-    }
+    fan = OFF;
   }
   
   if(currentState >= IDLE) {
-    //water level
-    *port_b |= 0x10;  //pb4 power sensor on to read input
-    unsigned int adc_voltage = adc_read(0); //read channel 0
-    *port_b &= 0xEF;  //pb4 plow
-    //float voltage_float = adc_voltage * 5.0 / 1024.0; //convert 0-1023 to 0-5.0V
-    int water_level = adc_voltage / 2;
-    //U0putint(water_level);
-    //U0putchar('\n');
-
-    //Serial output
-    //U0putVoltage(voltage_float);
-    if(water_level < 50) {
-      currentState = ERROR;
-    }
-
     //dht
-    int chk = DHT.read11(8); //read pin 8
-    lcd.setCursor(0,0); 
-    lcd.print("Temp: ");
-    lcd.print(DHT.temperature);
-    lcd.print((char)223);
-    lcd.print("C");
-    lcd.setCursor(0,1);
-    lcd.print("Humidity: ");
-    lcd.print(DHT.humidity);
-    lcd.print("%");
-
-    
+    if(currentMillis > updateMillis + 60000 || updateDisplay) {  //lcd update every minute + when forced (first upload, after error)
+      updateMillis = currentMillis;
+      updateDisplay = false;
+      int chk = DHT.read11(8); //read pin 8
+      
+      lcd.clear();
+      lcd.print("Temp: ");
+      lcd.print(DHT.temperature);
+      lcd.print((char)223);
+      lcd.print("C");
+      lcd.setCursor(0,1);
+      lcd.print("Humidity: ");
+      lcd.print(DHT.humidity);
+      lcd.print("%");
+    }
+    if(water_level < 35) {
+      setState(ERROR);
+    }
   }
 
   if(currentState == IDLE) {
@@ -146,8 +201,8 @@ void loop() {
       *port_l &= 0xF4;  //turn off other leds
     }
     
-    if(DHT.temperature > TARGET_TEMP + 1) {
-      currentState = RUNNING;
+    if(DHT.temperature > TARGET_TEMP) {
+      setState(RUNNING);
     }
   }
   
@@ -158,41 +213,38 @@ void loop() {
     }
 
     lcd.clear();
-    lcd.print("ERROR: Water Level Low");
+    lcd.setCursor(1,0);
+    lcd.print("--- ERROR ---");
+    lcd.setCursor(0,1);
+    lcd.print("Water Level Low");
     
-    U0putStringLn("Water Level Low");
+    if(water_level > 50) {
+      setState(IDLE);
+      updateDisplay = true; //update lcd to clear error message
+    }
   }
 
   if(currentState == DISABLED) {
     if(!(*port_l & 0x01)) {
       *port_l |= 0x01;  //turn on red led
+    }
+    if(*port_l & 0x0E) {
       *port_l &= 0xF1;  //turn off other leds
     }
   }
-
-  //vent control (stepper motor)
-  if(currentState > DISABLED) {
-    if(*port_b & 0x0C) {}   //if both bottons pressed, do nothing
-    else if(*pin_b & 0x04) {
-      stepper.setSpeed(300);
-      stepper.step(256);
-    }
-    else if(*pin_b & 0x08) {
-      stepper.setSpeed(300);
-      stepper.step(-256);
-    }
-  }
-
-
   //U0putint(currentState);
 
-
-  
   //getClock();
-  delay(1000);
+  delay(100);
 
 }
 
+ISR(TIMER1_OVF_vect) {
+  *myTCCR1B &= 0xF8;  //stop the timer
+  *myTCNT1 = (unsigned int) (1);  //set the counts
+  *port_b ^= 0x01;  //toggle fan power
+  *myTCCR1B |= 0x05; // start the timer with prescalar 1024
+}
 
 ISR(INT3_vect) {  //interrupt for on/off
   togglePower = 1;  //power toggle at beginning of loop, not done directly in case interrupt happens right before another state change
@@ -214,7 +266,7 @@ void setState(enum State state) { //set state and print timestamp
     case RUNNING:
       stateString = "Running";
   }
-  U0putString("Status: ");
+  U0putString("STATUS: ");
   U0putString(stateString);
   U0putString(" @ ");
   getClock();
@@ -228,6 +280,11 @@ void getClock() {
     U0putchar('0');
   }
   U0putint(rtc.minute());
+  U0putchar(':');
+  if(rtc.second() < 10) { //display :00 instead of :0
+    U0putchar('0');
+  }
+  U0putint(rtc.second());
   U0putchar(' ');
   U0putint(rtc.month());
   U0putchar('/');
@@ -278,13 +335,6 @@ void U0putString(String U0string) {
   }
 }
 
-void U0putStringLn(String U0string) {
-  for(int i = 0; i < U0string.length(); i++) {
-    U0putchar(U0string[i]);
-  }
-  U0putchar('\n');
-}
-
 void U0putint(int U0int) {
   int temp = U0int;
   unsigned char U0pdata;
@@ -302,16 +352,6 @@ void U0putint(int U0int) {
     temp = temp % power;
     power /= 10;
   }
-}
-
-void U0putVoltage(float voltage_float) {
-  unsigned char voltage_char[4];
-  float_to_char(voltage_float, voltage_char);
-
-  for(int i = 0; i < 4; i++) {
-    U0putchar(voltage_char[i]);
-  }
-  U0putchar('\n');
 }
 
 void adc_init()
@@ -354,14 +394,4 @@ unsigned int adc_read(unsigned char adc_channel_num)
   while((*my_ADCSRA & 0x40) != 0);
   // return the result in the ADC data register
   return *my_ADC_DATA;
-}
-
-void float_to_char(float num_float, unsigned char num_char[]) { //quick function to output float (1.23) through serial
-  int digit2 = num_float / 1;
-  num_char[0] = digit2 + '0';
-  num_char[1] = '.';
-  int digit1 = (int(num_float * 10)) % 10;
-  num_char[2] = digit1 + '0';
-  int digit0 = (int(num_float * 100)) % 10;
-  num_char[3] = digit0 + '0';
 }
